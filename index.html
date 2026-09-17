@@ -27,7 +27,18 @@
   button { background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 6px 10px; cursor: pointer; font-size: 13px; }
   button:hover { border-color: var(--accent); }
   button.primary { background: var(--accent); color: #222; font-weight: 700; border-color: var(--accent); }
-  #main { flex: 1; padding: 12px; overflow: auto; }
+  #app.panel-hidden #panel { display: none; }
+  #main { flex: 1; padding: 12px; overflow: auto; min-width: 0; }
+  #topbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px; }
+  #topbar .title { font-weight: 700; margin-right: auto; }
+  #canvasWrap.fit { display: block; width: 100%; }
+  #canvasWrap.fit canvas { width: 100% !important; height: auto !important; }
+  @media (max-width: 800px) {
+    #app { flex-direction: column; }
+    #panel { width: 100%; flex: none; height: auto; max-height: 70vh; position: static; border-right: none; border-bottom: 1px solid var(--border); }
+    #main { padding: 8px; }
+    .row input[type=text] { width: 140px; }
+  }
   #status { margin: 6px 0; color: var(--muted); min-height: 18px; white-space: pre-wrap; }
   #canvasWrap { display: inline-block; border: 1px solid var(--border); background: #000; line-height: 0; }
   canvas { image-rendering: pixelated; cursor: crosshair; }
@@ -59,6 +70,12 @@
     </div>
   </aside>
   <main id="main">
+    <div id="topbar">
+      <button id="btnPanel">⚙ 設定を隠す</button>
+      <span class="title">ダンジョンフロア生成機</span>
+      <button id="btnGen2" class="primary">生成</button>
+      <button id="btnNewSeed2">🎲 新しいシード</button>
+    </div>
     <div id="status"></div>
     <div id="canvasWrap"><canvas id="cv"></canvas></div>
     <div id="legend"></div>
@@ -114,7 +131,7 @@ const DEFAULTS = {
   roundProb: 30, pillarProb: 15, mazeProb: 10, mazeLoop: 10,
   bend: 30, extra: 25,
   items: 6, monsters: 5, traps: 4, stairs: 1, shopProb: 20, mhProb: 10,
-  cellSize: 8, showGrid: true, showLabels: true,
+  cellSize: 8, showGrid: true, showLabels: true, fitWidth: false,
 };
 
 function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
@@ -665,6 +682,7 @@ if (typeof document !== 'undefined') (function () {
     { id: 'cellSize', type: 'range', label: 'マスの大きさ(px)', min: 3, max: 16, view: true },
     { id: 'showGrid', type: 'checkbox', label: 'グリッド線', view: true },
     { id: 'showLabels', type: 'checkbox', label: '記号を表示（10px以上）', view: true },
+    { id: 'fitWidth', type: 'checkbox', label: '画面幅に合わせて縮小', view: true },
   ];
   const $ = id => document.getElementById(id);
   const controls = $('controls'), inputs = {};
@@ -713,6 +731,7 @@ if (typeof document !== 'undefined') (function () {
     const p = getParams(), cs = p.cellSize, dpr = window.devicePixelRatio || 1;
     cv.width = W * cs * dpr; cv.height = H * cs * dpr; cv.style.width = W * cs + 'px'; cv.style.height = H * cs + 'px';
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    $('canvasWrap').classList.toggle('fit', !!p.fitWidth);
     const wallColor = MATERIALS[f.p.wall].color;
     for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
       const t = f.get(x, y); let c;
@@ -771,8 +790,8 @@ if (typeof document !== 'undefined') (function () {
   const baseStatus = () => current ? describe(current) : '';
   cv.addEventListener('mousemove', e => {
     if (!current) return;
-    const cs = getParams().cellSize, rect = cv.getBoundingClientRect();
-    const x = Math.floor((e.clientX - rect.left) / cs), y = Math.floor((e.clientY - rect.top) / cs);
+    const rect = cv.getBoundingClientRect();
+    const x = Math.floor((e.clientX - rect.left) / rect.width * W), y = Math.floor((e.clientY - rect.top) / rect.height * H);
     if (x < 0 || y < 0 || x >= W || y >= H) return;
     const t = current.get(x, y), rid = current.rid(x, y);
     const tn = t === T.BORDER ? '絶対壁（外周）' : t === T.WALL || t === T.ROOMWALL ? MATERIALS[current.p.wall].label : t === T.CORRIDOR ? '通路' : '部屋の床';
@@ -790,7 +809,15 @@ if (typeof document !== 'undefined') (function () {
   // ---------- ボタン ----------
   function download(name, blob) { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000); }
   $('btnGen').addEventListener('click', () => generate(false));
+  $('btnGen2').addEventListener('click', () => generate(false));
   $('btnNewSeed').addEventListener('click', () => generate(true));
+  $('btnNewSeed2').addEventListener('click', () => generate(true));
+  function setPanel(hidden) {
+    $('app').classList.toggle('panel-hidden', hidden);
+    $('btnPanel').textContent = hidden ? '⚙ 設定を表示' : '⚙ 設定を隠す';
+    try { localStorage.setItem('panelHidden', hidden ? '1' : '0'); } catch (e) { /* ignore */ }
+  }
+  $('btnPanel').addEventListener('click', () => setPanel(!$('app').classList.contains('panel-hidden')));
   $('btnReset').addEventListener('click', () => { setParams(DEFAULTS); generate(true); });
   $('btnPng').addEventListener('click', () => { if (current) cv.toBlob(b => download(`floor_${current.seed}.png`, b)); });
   $('btnJson').addEventListener('click', () => { if (current) download(`floor_${current.seed}.json`, new Blob([JSON.stringify(floorToJSON(current), null, 1)], { type: 'application/json' })); });
@@ -799,7 +826,11 @@ if (typeof document !== 'undefined') (function () {
 
   // ---------- 初期化 ----------
   buildControls();
+  let panelHidden = window.innerWidth < 800;
+  try { const v = localStorage.getItem('panelHidden'); if (v !== null) panelHidden = v === '1'; } catch (e) { /* ignore */ }
+  setPanel(panelHidden);
   let initial = Object.assign({}, DEFAULTS);
+  if (window.innerWidth < 800) initial.fitWidth = true;
   try { if (location.hash.length > 1) Object.assign(initial, JSON.parse(decodeURIComponent(escape(atob(location.hash.slice(1)))))); } catch (e) { /* ignore */ }
   setParams(initial);
   generate(false);
