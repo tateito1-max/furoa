@@ -550,6 +550,20 @@ function populate(f) {
     for (const c of cells) { const k = c.y * W + c.x; if (!occ.has(k)) { occ.add(k); f.objects.push({ type, x: c.x, y: c.y, room: room.id }); return true; } }
     return false;
   };
+  // 部屋の入り口（通路に隣接する床）には罠を置かない
+  const isEntrance = c => DIRS.some(([dx, dy]) => f.get(c.x + dx, c.y + dy) === T.CORRIDOR);
+  const trapCells = room => room.floor.filter(c => !isEntrance(c));
+  // 店の商品ブロック: 部屋の内側（縁を除く）に収まる bw×bh の全配置を列挙
+  const blockPlacements = (room, bw, bh) => {
+    const out = [];
+    for (let y = room.y0 + 1; y + bh - 1 <= room.y1 - 1; y++) for (let x = room.x0 + 1; x + bw - 1 <= room.x1 - 1; x++) {
+      let ok = true;
+      for (let j = 0; j < bh && ok; j++) for (let i = 0; i < bw; i++) if (f.get(x + i, y + j) !== T.ROOM || occ.has((y + j) * W + x + i)) { ok = false; break; }
+      if (ok) out.push({ x, y, bw, bh });
+    }
+    return out;
+  };
+  const SHOP_BLOCKS = [[2, 3], [3, 2], [2, 4], [4, 2], [3, 3], [3, 4], [4, 3]];
   const start = rng.pick(rooms); start.isStart = true;
   // モンスターハウス
   let mh = null;
@@ -560,9 +574,8 @@ function populate(f) {
   }
   // 店（入口が最も少ない部屋を選ぶ。通常は入口1つ）
   let shop = null;
-  const interior = r => r.floor.filter(c => c.x > r.x0 && c.x < r.x1 && c.y > r.y0 && c.y < r.y1);
   if (rng.chance(p.shopProb / 100)) {
-    let cands = rooms.filter(r => r !== start && r.role === 'normal' && r.doors.length >= 1 && interior(r).length >= 4);
+    let cands = rooms.filter(r => r !== start && r.role === 'normal' && r.doors.length >= 1 && (blockPlacements(r, 2, 3).length || blockPlacements(r, 3, 2).length));
     if (cands.length) {
       const minD = Math.min(...cands.map(r => r.doors.length));
       shop = rng.pick(cands.filter(r => r.doors.length === minD)); shop.role = 'shop';
@@ -582,20 +595,28 @@ function populate(f) {
       const ins = d.side === 'top' ? { x: d.x, y: d.y + 1 } : d.side === 'bottom' ? { x: d.x, y: d.y - 1 } : d.side === 'left' ? { x: d.x + 1, y: d.y } : { x: d.x - 1, y: d.y };
       if (f.get(ins.x, ins.y) === T.ROOM) placeIn('shopkeeper', shop, [ins]); else placeIn('shopkeeper', shop);
     }
-    for (const c of interior(shop)) if (rng.chance(0.85)) placeIn('shopItem', shop, [c]);
+    let placed = false;
+    for (const [bw, bh] of rng.shuffle(SHOP_BLOCKS.slice())) {
+      const pl = blockPlacements(shop, bw, bh);
+      if (!pl.length) continue;
+      const b = rng.pick(pl);
+      for (let j = 0; j < bh; j++) for (let i = 0; i < bw; i++) placeIn('shopItem', shop, [{ x: b.x + i, y: b.y + j }]);
+      f.log.push(`店の商品: ${bw}×${bh} = ${bw * bh} 個`); placed = true; break;
+    }
+    if (!placed) f.log.push('店の商品: 置ける場所がありません');
   }
   // モンスターハウスの中身
   if (mh) {
     const n = mh.floor.length;
     for (let i = 0; i < clamp(Math.round(n * 0.2), 4, 80); i++) placeIn('monster', mh);
     for (let i = 0; i < Math.min(Math.round(n * 0.1), 40); i++) placeIn('item', mh);
-    for (let i = 0; i < Math.min(Math.round(n * 0.04), 20); i++) placeIn('trap', mh);
+    for (let i = 0; i < Math.min(Math.round(n * 0.04), 20); i++) placeIn('trap', mh, trapCells(mh));
   }
   // 通常配置
   const pickRoom = (filter) => { let c = rooms.filter(filter); if (!c.length) c = rooms.filter(r => r.role !== 'shop'); if (!c.length) c = rooms; return rng.pick(c); };
   for (let i = 0; i < p.items; i++) placeIn('item', pickRoom(r => r.role !== 'shop' && r.role !== 'mhouse'));
   for (let i = 0; i < p.monsters; i++) placeIn('monster', pickRoom(r => r.role !== 'shop' && r.role !== 'mhouse' && (rooms.length > 1 ? r !== start : true)));
-  for (let i = 0; i < p.traps; i++) placeIn('trap', pickRoom(r => r.role !== 'shop' && r.role !== 'mhouse'));
+  for (let i = 0; i < p.traps; i++) { const r = pickRoom(r => r.role !== 'shop' && r.role !== 'mhouse'); placeIn('trap', r, trapCells(r)); }
 }
 
 function generateFloor(params) {
