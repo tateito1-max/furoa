@@ -1,0 +1,812 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ダンジョンフロア生成機</title>
+<style>
+  :root {
+    --bg: #1b1d22; --panel: #24272e; --panel2: #2c3038; --text: #e6e6e6; --muted: #9aa0a8;
+    --accent: #f1c40f; --border: #3a3f48;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif; font-size: 13px; }
+  #app { display: flex; min-height: 100vh; }
+  #panel { width: 330px; flex: 0 0 330px; background: var(--panel); border-right: 1px solid var(--border); padding: 12px; overflow-y: auto; height: 100vh; position: sticky; top: 0; }
+  #panel h1 { font-size: 16px; margin: 0 0 10px; }
+  #panel h2 { font-size: 12px; margin: 14px 0 6px; color: var(--accent); letter-spacing: .05em; border-bottom: 1px solid var(--border); padding-bottom: 3px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 4px 0; }
+  .row label { flex: 1; color: var(--text); }
+  .row .val { color: var(--muted); min-width: 32px; text-align: right; font-variant-numeric: tabular-nums; }
+  .row input[type=number], .row input[type=text], .row select { width: 120px; background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px; font-size: 13px; }
+  .row input[type=text] { width: 160px; }
+  .row input[type=range] { width: 130px; }
+  .row.pair input[type=number] { width: 58px; }
+  .hint { color: var(--muted); font-size: 11px; margin: 0 0 6px; }
+  .btns { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+  button { background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 6px 10px; cursor: pointer; font-size: 13px; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: #222; font-weight: 700; border-color: var(--accent); }
+  #main { flex: 1; padding: 12px; overflow: auto; }
+  #status { margin: 6px 0; color: var(--muted); min-height: 18px; white-space: pre-wrap; }
+  #canvasWrap { display: inline-block; border: 1px solid var(--border); background: #000; line-height: 0; }
+  canvas { image-rendering: pixelated; cursor: crosshair; }
+  #legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 10px 0; color: var(--muted); }
+  .lg { display: inline-flex; align-items: center; gap: 5px; }
+  .sw { width: 14px; height: 14px; display: inline-block; border: 1px solid #000; }
+  .sw.circle { border-radius: 50%; }
+  #log { color: var(--muted); font-size: 12px; white-space: pre-wrap; }
+  textarea { width: 100%; height: 260px; background: var(--panel2); color: var(--text); border: 1px solid var(--border); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; line-height: 1; white-space: pre; display: none; }
+  textarea.show { display: block; }
+  details summary { cursor: pointer; color: var(--muted); }
+</style>
+</head>
+<body>
+<div id="app">
+  <aside id="panel">
+    <h1>ダンジョンフロア生成機</h1>
+    <p class="hint">100×100マス。四角＝地形、丸＝オブジェクト。</p>
+    <div id="controls"></div>
+    <div class="btns">
+      <button id="btnGen" class="primary">生成</button>
+      <button id="btnNewSeed">🎲 新しいシードで生成</button>
+    </div>
+    <div class="btns">
+      <button id="btnPng">PNG保存</button>
+      <button id="btnJson">JSON保存</button>
+      <button id="btnText">テキスト表示</button>
+      <button id="btnReset">設定リセット</button>
+    </div>
+  </aside>
+  <main id="main">
+    <div id="status"></div>
+    <div id="canvasWrap"><canvas id="cv"></canvas></div>
+    <div id="legend"></div>
+    <div id="log"></div>
+    <textarea id="text" readonly spellcheck="false"></textarea>
+  </main>
+</div>
+<script>
+'use strict';
+// ============================================================
+//  生成エンジン
+// ============================================================
+const W = 100, H = 100;
+const T = { BORDER: 0, WALL: 1, ROOM: 2, CORRIDOR: 3, ROOMWALL: 4 };
+
+const MATERIALS = {
+  normal:   { label: '普通の壁', color: '#6e5640', ch: '#' },
+  hard:     { label: '硬い壁',   color: '#4b4f5c', ch: '%' },
+  absolute: { label: '絶対壁',   color: '#1c1c22', ch: '@' },
+  water:    { label: '水路',     color: '#3b7ddd', ch: '~' },
+  air:      { label: '空中',     color: '#a9d3f2', ch: '_' },
+};
+const FLOOR_TYPES = {
+  normal: '通常フロア',
+  bigRoom: '大部屋',
+  bigRoomPillar: '大部屋（柱の間）',
+  bigMaze: '大部屋迷路',
+  sun: '太陽フロア',
+  o: 'O形フロア',
+  zelda: 'ゼルダフロア',
+};
+const OBJ = {
+  stairs:     { label: '階段',            color: '#ffffff', ch: '>', mark: '↓' },
+  player:     { label: 'プレイヤー初期位置', color: '#f1c40f', ch: 'P', mark: 'P' },
+  item:       { label: 'アイテム',        color: '#2ecc71', ch: 'i', mark: 'I' },
+  monster:    { label: 'モンスター',      color: '#e74c3c', ch: 'm', mark: 'M' },
+  trap:       { label: '罠',              color: '#9b59b6', ch: 't', mark: 'T' },
+  shopkeeper: { label: '店主',            color: '#ff8c1a', ch: 'K', mark: '店' },
+  shopItem:   { label: '店の商品',        color: '#1abc9c', ch: '$', mark: '$' },
+};
+const TERRAIN_COLORS = {
+  border: '#000000',
+  room: '#e2d3ae',
+  corridor: '#a99270',
+  shop: '#f0d070',
+  mhouse: '#e39a9a',
+};
+
+const DEFAULTS = {
+  seed: '', floorType: 'normal', wall: 'normal',
+  roomMin: 5, roomMax: 8, wMin: 5, wMax: 14, hMin: 4, hMax: 10,
+  centerSize: 30, zeldaLen: 3,
+  roundProb: 30, pillarProb: 15, mazeProb: 10, mazeLoop: 10,
+  bend: 30, extra: 25,
+  items: 6, monsters: 5, traps: 4, stairs: 1, shopProb: 20, mhProb: 10,
+  cellSize: 8, showGrid: true, showLabels: true,
+};
+
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+function hashSeed(str) {
+  let h = 1779033703 ^ str.length;
+  for (let i = 0; i < str.length; i++) { h = Math.imul(h ^ str.charCodeAt(i), 3432918353); h = (h << 13) | (h >>> 19); }
+  h = Math.imul(h ^ (h >>> 16), 2246822507); h = Math.imul(h ^ (h >>> 13), 3266489909);
+  return (h ^ (h >>> 16)) >>> 0;
+}
+class RNG {
+  constructor(seed) { this.a = hashSeed(String(seed)) || 1; }
+  next() { this.a |= 0; this.a = (this.a + 0x6D2B79F5) | 0; let t = Math.imul(this.a ^ (this.a >>> 15), 1 | this.a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }
+  int(a, b) { if (b < a) [a, b] = [b, a]; return a + Math.floor(this.next() * (b - a + 1)); }
+  chance(p) { return this.next() < p; }
+  pick(arr) { return arr[Math.floor(this.next() * arr.length)]; }
+  shuffle(arr) { for (let i = arr.length - 1; i > 0; i--) { const j = Math.floor(this.next() * (i + 1)); [arr[i], arr[j]] = [arr[j], arr[i]]; } return arr; }
+}
+
+class Floor {
+  constructor(params, rng, seed) {
+    this.p = params; this.rng = rng; this.seed = seed;
+    this.grid = new Uint8Array(W * H).fill(T.WALL);
+    this.roomId = new Int16Array(W * H).fill(-1);
+    this.rooms = []; this.objects = []; this.log = [];
+    for (let x = 0; x < W; x++) { this.grid[x] = T.BORDER; this.grid[(H - 1) * W + x] = T.BORDER; }
+    for (let y = 0; y < H; y++) { this.grid[y * W] = T.BORDER; this.grid[y * W + W - 1] = T.BORDER; }
+  }
+  get(x, y) { return this.grid[y * W + x]; }
+  set(x, y, v) { this.grid[y * W + x] = v; }
+  rid(x, y) { return this.roomId[y * W + x]; }
+  inBounds(x, y) { return x >= 0 && y >= 0 && x < W && y < H; }
+  overlaps(x0, y0, x1, y1, m) {
+    return this.rooms.some(r => r.x0 - m <= x1 && x0 - m <= r.x1 && r.y0 - m <= y1 && y0 - m <= r.y1);
+  }
+  addRoom(spec) {
+    let { x0, y0, w, h, kind = 'normal', role = 'normal' } = spec;
+    if (kind === 'maze') { if (w % 2 === 0) w--; if (h % 2 === 0) h--; }
+    const room = { id: this.rooms.length, x0, y0, w, h, x1: x0 + w - 1, y1: y0 + h - 1, kind, role, doors: [], floor: [] };
+    room.cx = (room.x0 + room.x1) / 2; room.cy = (room.y0 + room.y1) / 2;
+    if (room.x0 < 1 || room.y0 < 1 || room.x1 > W - 2 || room.y1 > H - 2) throw new Error('room out of bounds');
+    this.rooms.push(room);
+    stampRoom(this, room);
+    return room;
+  }
+}
+
+function stampRoom(f, room) {
+  const { x0, y0, x1, y1, w, h } = room;
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) { f.roomId[y * W + x] = room.id; f.grid[y * W + x] = T.ROOM; }
+  if (room.kind === 'rounded') {
+    const r = clamp(Math.round(Math.min(w, h) / 2.5), 3, 8);
+    for (let j = 0; j < r; j++) for (let i = 0; i < r; i++) {
+      if (Math.hypot(i + 0.5 - r, j + 0.5 - r) > r) {
+        f.set(x0 + i, y0 + j, T.ROOMWALL); f.set(x1 - i, y0 + j, T.ROOMWALL);
+        f.set(x0 + i, y1 - j, T.ROOMWALL); f.set(x1 - i, y1 - j, T.ROOMWALL);
+      }
+    }
+  } else if (room.kind === 'pillar') {
+    for (let oy = 1; oy <= h - 2; oy += 2) for (let ox = 1; ox <= w - 2; ox += 2) f.set(x0 + ox, y0 + oy, T.ROOMWALL);
+  } else if (room.kind === 'maze') {
+    carveMaze(f, room, f.p.mazeLoop / 100);
+  }
+  room.floor = [];
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) if (f.get(x, y) === T.ROOM) room.floor.push({ x, y });
+}
+
+// 迷路（部屋のサイズは奇数）。奇数オフセットが壁、偶数オフセットが通路。
+function carveMaze(f, room, loopRate) {
+  const { x0, y0, w, h } = room, rng = f.rng;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) f.set(x0 + x, y0 + y, T.ROOMWALL);
+  const cw = (w + 1) / 2, ch = (h + 1) / 2;
+  const visited = new Uint8Array(cw * ch);
+  const stack = [[0, 0]]; visited[0] = 1; f.set(x0, y0, T.ROOM);
+  const D = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  while (stack.length) {
+    const [cx, cy] = stack[stack.length - 1];
+    const nb = [];
+    for (const [dx, dy] of D) { const nx = cx + dx, ny = cy + dy; if (nx >= 0 && ny >= 0 && nx < cw && ny < ch && !visited[ny * cw + nx]) nb.push([nx, ny]); }
+    if (!nb.length) { stack.pop(); continue; }
+    const [nx, ny] = rng.pick(nb);
+    visited[ny * cw + nx] = 1;
+    f.set(x0 + 2 * nx, y0 + 2 * ny, T.ROOM);
+    f.set(x0 + cx + nx, y0 + cy + ny, T.ROOM);
+    stack.push([nx, ny]);
+  }
+  if (loopRate > 0) {
+    for (let cy = 0; cy < ch; cy++) for (let cx = 0; cx < cw; cx++) {
+      if (cx < cw - 1 && f.get(x0 + 2 * cx + 1, y0 + 2 * cy) === T.ROOMWALL && rng.chance(loopRate)) f.set(x0 + 2 * cx + 1, y0 + 2 * cy, T.ROOM);
+      if (cy < ch - 1 && f.get(x0 + 2 * cx, y0 + 2 * cy + 1) === T.ROOMWALL && rng.chance(loopRate)) f.set(x0 + 2 * cx, y0 + 2 * cy + 1, T.ROOM);
+    }
+  }
+}
+
+function rollKind(f, w, h, allowMaze = true) {
+  const p = f.p, rng = f.rng;
+  if (allowMaze && w >= 5 && h >= 5 && rng.chance(p.mazeProb / 100)) return 'maze';
+  if (w >= 5 && h >= 5 && rng.chance(p.pillarProb / 100)) return 'pillar';
+  if (Math.min(w, h) >= 5 && rng.chance(p.roundProb / 100)) return 'rounded';
+  return 'normal';
+}
+
+// ---------- ドア ----------
+function doorCandidates(f, room, side) {
+  const out = [];
+  const okCell = (x, y, ax, ay, bx, by) => {
+    if (x < 1 || y < 1 || x > W - 2 || y > H - 2) return false;
+    const t = f.get(x, y);
+    if (!(t === T.WALL || t === T.CORRIDOR) || f.rid(x, y) !== -1) return false;
+    if (t !== T.CORRIDOR) { // 隣にすでにドア（通路）があるなら2幅の入口になるので避ける
+      if (f.inBounds(ax, ay) && f.get(ax, ay) === T.CORRIDOR) return false;
+      if (f.inBounds(bx, by) && f.get(bx, by) === T.CORRIDOR) return false;
+    }
+    return true;
+  };
+  if (side === 'top' || side === 'bottom') {
+    const ey = side === 'top' ? room.y0 : room.y1, oy = side === 'top' ? room.y0 - 1 : room.y1 + 1;
+    for (let x = room.x0 + 1; x <= room.x1 - 1; x++) if (f.get(x, ey) === T.ROOM && okCell(x, oy, x - 1, oy, x + 1, oy)) out.push({ x, y: oy, side });
+  } else {
+    const ex = side === 'left' ? room.x0 : room.x1, ox = side === 'left' ? room.x0 - 1 : room.x1 + 1;
+    for (let y = room.y0 + 1; y <= room.y1 - 1; y++) if (f.get(ex, y) === T.ROOM && okCell(ox, y, ox, y - 1, ox, y + 1)) out.push({ x: ox, y, side });
+  }
+  return out;
+}
+
+function pickDoor(f, room, target, opts = {}) {
+  const rng = f.rng;
+  const dx = target.x - room.cx, dy = target.y - room.cy;
+  const sides = [['right', dx], ['left', -dx], ['bottom', dy], ['top', -dy]].sort((a, b) => b[1] - a[1]);
+  const dist = d => Math.hypot(d.x - target.x, d.y - target.y);
+  for (const [side] of sides) {
+    const cands = doorCandidates(f, room, side).sort((a, b) => dist(a) - dist(b));
+    const existing = room.doors.filter(d => d.side === side).sort((a, b) => dist(a) - dist(b));
+    if (existing.length && (!cands.length || (dist(existing[0]) <= dist(cands[0]) + 6 && rng.chance(0.5)))) {
+      return { x: existing[0].x, y: existing[0].y, side, isNew: false };
+    }
+    if (!cands.length) continue;
+    const d = opts.centered ? cands[0] : cands[rng.int(0, Math.ceil(cands.length * 0.5) - 1)];
+    return { x: d.x, y: d.y, side, isNew: true };
+  }
+  return null;
+}
+
+// ---------- 通路（方向付きダイクストラ。曲がり具合はコストノイズと転回ペナルティで制御） ----------
+class MinHeap {
+  constructor() { this.k = []; this.v = []; }
+  push(key, val) { const k = this.k, v = this.v; k.push(key); v.push(val); let i = k.length - 1; while (i > 0) { const p = (i - 1) >> 1; if (k[p] <= k[i]) break; [k[p], k[i]] = [k[i], k[p]]; [v[p], v[i]] = [v[i], v[p]]; i = p; } }
+  pop() { const k = this.k, v = this.v; const rk = k[0], rv = v[0]; const lk = k.pop(), lv = v.pop(); if (k.length) { k[0] = lk; v[0] = lv; let i = 0; for (;;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < k.length && k[l] < k[m]) m = l; if (r < k.length && k[r] < k[m]) m = r; if (m === i) break; [k[m], k[i]] = [k[i], k[m]]; [v[m], v[i]] = [v[i], v[m]]; i = m; } } return [rk, rv]; }
+  get size() { return this.k.length; }
+}
+const DIRS = [[1, 0], [0, 1], [-1, 0], [0, -1]];
+
+function carvePath(f, a, b, bend, permissive) {
+  const rng = f.rng, N = W * H;
+  const turnPen = (1 - bend) * 6 + 0.3, noiseAmp = bend * 5;
+  const cost = new Float32Array(N);
+  const aIdx = a.y * W + a.x, bIdx = b.y * W + b.x;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x, t = f.grid[i];
+    if (t === T.BORDER || t === T.ROOMWALL) { cost[i] = Infinity; continue; }
+    if (t === T.ROOM) { cost[i] = permissive ? 25 : Infinity; continue; }
+    let c = t === T.CORRIDOR ? 0.5 : 1 + rng.next() * noiseAmp;
+    if (i !== aIdx && i !== bIdx) {
+      let hug = false, par = false;
+      for (let dy = -1; dy <= 1 && !hug; dy++) for (let dx = -1; dx <= 1; dx++) {
+        if (!dx && !dy) continue; const nx = x + dx, ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+        if (f.roomId[ny * W + nx] !== -1) { hug = true; break; }
+      }
+      if (t !== T.CORRIDOR) for (const [dx, dy] of DIRS) { const nx = x + dx, ny = y + dy; if (nx >= 0 && ny >= 0 && nx < W && ny < H && f.grid[ny * W + nx] === T.CORRIDOR) { par = true; break; } }
+      if (hug) c += 10; if (par) c += 2.5;
+    }
+    cost[i] = c;
+  }
+  const dist = new Float64Array(N * 4).fill(Infinity), prev = new Int32Array(N * 4).fill(-1);
+  const heap = new MinHeap();
+  for (let d = 0; d < 4; d++) { dist[aIdx * 4 + d] = 0; heap.push(0, aIdx * 4 + d); }
+  let endState = -1;
+  while (heap.size) {
+    const [cd, s] = heap.pop();
+    if (cd > dist[s]) continue;
+    const ci = s >> 2, cdir = s & 3;
+    if (ci === bIdx) { endState = s; break; }
+    const cx = ci % W, cy = (ci - cx) / W;
+    for (let d = 0; d < 4; d++) {
+      const nx = cx + DIRS[d][0], ny = cy + DIRS[d][1];
+      if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+      const ni = ny * W + nx, c = cost[ni];
+      if (c === Infinity) continue;
+      const nd = cd + c + (d !== cdir ? turnPen : 0);
+      const ns = ni * 4 + d;
+      if (nd < dist[ns]) { dist[ns] = nd; prev[ns] = s; heap.push(nd, ns); }
+    }
+  }
+  if (endState < 0) return false;
+  for (let s = endState; s >= 0; s = prev[s]) { const i = s >> 2; if (f.grid[i] === T.WALL) f.grid[i] = T.CORRIDOR; }
+  return true;
+}
+
+function registerDoor(room, d) {
+  if (!room.doors.some(e => e.x === d.x && e.y === d.y)) room.doors.push({ x: d.x, y: d.y, side: d.side });
+}
+
+function connectRooms(f, A, B, opts = {}) {
+  const dA = pickDoor(f, A, { x: B.cx, y: B.cy }, opts); if (!dA) return false;
+  const dB = pickDoor(f, B, dA, opts); if (!dB) return false;
+  const bend = opts.bend !== undefined ? opts.bend : f.p.bend / 100;
+  let ok = carvePath(f, dA, dB, bend, false);
+  if (!ok) ok = carvePath(f, dA, dB, bend, true);
+  if (ok) { registerDoor(A, dA); registerDoor(B, dB); }
+  return ok;
+}
+
+// ---------- 接続グラフ ----------
+function edgesByProximity(f, extraRate) {
+  const rooms = f.rooms, n = rooms.length, edges = [], key = (i, j) => i < j ? `${i}-${j}` : `${j}-${i}`;
+  if (n < 2) return edges;
+  const d = (i, j) => Math.hypot(rooms[i].cx - rooms[j].cx, rooms[i].cy - rooms[j].cy);
+  const inTree = new Uint8Array(n), best = new Float64Array(n).fill(Infinity), from = new Int32Array(n).fill(-1);
+  inTree[0] = 1; for (let j = 1; j < n; j++) { best[j] = d(0, j); from[j] = 0; }
+  const used = new Set();
+  for (let k = 1; k < n; k++) {
+    let m = -1; for (let j = 0; j < n; j++) if (!inTree[j] && (m < 0 || best[j] < best[m])) m = j;
+    inTree[m] = 1; edges.push([from[m], m]); used.add(key(from[m], m));
+    for (let j = 0; j < n; j++) if (!inTree[j] && d(m, j) < best[j]) { best[j] = d(m, j); from[j] = m; }
+  }
+  for (let i = 0; i < n; i++) {
+    const near = []; for (let j = 0; j < n; j++) if (j !== i) near.push(j);
+    near.sort((a, b) => d(i, a) - d(i, b));
+    for (const j of near.slice(0, 3)) { const k = key(i, j); if (!used.has(k) && f.rng.chance(extraRate)) { used.add(k); edges.push([i, j]); } }
+  }
+  return edges;
+}
+
+// ---------- フロアタイプ別レイアウト ----------
+function layoutNormal(f) {
+  const p = f.p, rng = f.rng, usable = 96;
+  let nRooms = rng.int(p.roomMin, p.roomMax);
+  const target = nRooms + rng.int(0, 2);
+  let cols = Math.max(1, Math.round(Math.sqrt(target))), rows = Math.max(1, Math.ceil(target / cols));
+  const minW = Math.max(3, Math.min(p.wMin, p.wMax)), minH = Math.max(3, Math.min(p.hMin, p.hMax));
+  while (cols > 1 && Math.floor(usable / cols) - 2 < minW) cols--;
+  while (rows > 1 && Math.floor(usable / rows) - 2 < minH) rows--;
+  if (cols * rows < nRooms) { nRooms = cols * rows; f.log.push(`部屋サイズが大きいため部屋数を ${nRooms} に制限しました`); }
+  const secW = Math.floor(usable / cols), secH = Math.floor(usable / rows);
+  const sectors = []; for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) sectors.push({ c, r });
+  rng.shuffle(sectors);
+  for (let i = 0; i < nRooms; i++) {
+    const { c, r } = sectors[i];
+    const sx0 = 2 + c * secW, sx1 = c === cols - 1 ? 97 : sx0 + secW - 1;
+    const sy0 = 2 + r * secH, sy1 = r === rows - 1 ? 97 : sy0 + secH - 1;
+    const ix0 = sx0 + 1, ix1 = sx1 - 1, iy0 = sy0 + 1, iy1 = sy1 - 1;
+    const w = rng.int(minW, clamp(Math.max(p.wMin, p.wMax), minW, ix1 - ix0 + 1));
+    const h = rng.int(minH, clamp(Math.max(p.hMin, p.hMax), minH, iy1 - iy0 + 1));
+    const x0 = rng.int(ix0, ix1 - w + 1), y0 = rng.int(iy0, iy1 - h + 1);
+    f.addRoom({ x0, y0, w, h, kind: rollKind(f, w, h) });
+  }
+  return edgesByProximity(f, p.extra / 100);
+}
+
+function layoutBig(f, kind) {
+  f.addRoom({ x0: 2, y0: 2, w: 96, h: 96, kind });
+  return [];
+}
+
+function randSize(f, shrink) {
+  const p = f.p;
+  const w = shrink ? Math.min(p.wMin, p.wMax) : f.rng.int(p.wMin, p.wMax);
+  const h = shrink ? Math.min(p.hMin, p.hMax) : f.rng.int(p.hMin, p.hMax);
+  return [Math.max(3, w), Math.max(3, h)];
+}
+
+function layoutSun(f) {
+  const p = f.p, rng = f.rng;
+  const C = clamp(p.centerSize, 8, 60);
+  const cx0 = 50 - Math.floor(C / 2);
+  const center = f.addRoom({ x0: cx0, y0: cx0, w: C, h: C, kind: rng.chance(p.pillarProb / 100) ? 'pillar' : 'normal', role: 'center' });
+  const n = rng.int(p.roomMin, p.roomMax), placed = [];
+  for (let i = 0; i < n; i++) {
+    const step = 2 * Math.PI / n;
+    const baseA = step * i + (rng.next() - 0.5) * step * 0.5;
+    let ok = false;
+    for (let att = 0; att < 14 && !ok; att++) {
+      const a = baseA + (rng.next() - 0.5) * 0.3;
+      const [w, h] = randSize(f, att >= 7);
+      const half = Math.max(w, h) / 2, m = Math.max(Math.abs(Math.cos(a)), Math.abs(Math.sin(a)));
+      const rmin = (C / 2 + 3 + half) / m, rmax = (46.5 - half) / m;
+      if (rmax < rmin) continue;
+      const r = rmin + rng.next() * (rmax - rmin) * 0.75;
+      const x0 = clamp(Math.round(49.5 + r * Math.cos(a) - w / 2), 2, 98 - w), y0 = clamp(Math.round(49.5 + r * Math.sin(a) - h / 2), 2, 98 - h);
+      if (f.overlaps(x0, y0, x0 + w - 1, y0 + h - 1, 3)) continue;
+      const room = f.addRoom({ x0, y0, w, h, kind: rollKind(f, w, h) });
+      room.angle = Math.atan2(room.cy - 49.5, room.cx - 49.5); placed.push(room); ok = true;
+    }
+  }
+  if (placed.length < n) f.log.push(`周囲の部屋: ${n} 個中 ${placed.length} 個を配置（スペース不足）`);
+  const edges = placed.map(r => [center.id, r.id]);
+  placed.sort((a, b) => a.angle - b.angle);
+  for (let i = 0; i < placed.length && placed.length >= 3; i++) {
+    const A = placed[i], B = placed[(i + 1) % placed.length];
+    if (rng.chance(p.extra / 100 * 0.5)) edges.push([A.id, B.id]);
+  }
+  return edges;
+}
+
+function layoutO(f) {
+  const p = f.p, rng = f.rng;
+  let n = rng.int(p.roomMin, p.roomMax);
+  if (n < 3) { n = 3; f.log.push('O形フロアのため部屋数を 3 にしました'); }
+  const maxHalf = Math.ceil(Math.max(p.wMax, p.hMax, p.wMin, p.hMin) / 2);
+  const R = Math.max(10, 46 - maxHalf);
+  const placed = [], step = 2 * Math.PI / n;
+  for (let i = 0; i < n; i++) {
+    const baseA = -Math.PI / 2 + step * i + (rng.next() - 0.5) * step * 0.4;
+    for (let att = 0; att < 10; att++) {
+      const a = baseA + (rng.next() - 0.5) * step * 0.2;
+      const [w, h] = randSize(f, att >= 5);
+      const r = R - rng.int(0, Math.min(8, Math.floor(R * 0.25)));
+      const x0 = clamp(Math.round(49.5 + r * Math.cos(a) - w / 2), 2, 98 - w), y0 = clamp(Math.round(49.5 + r * Math.sin(a) - h / 2), 2, 98 - h);
+      if (f.overlaps(x0, y0, x0 + w - 1, y0 + h - 1, 3)) continue;
+      const room = f.addRoom({ x0, y0, w, h, kind: rollKind(f, w, h) });
+      room.angle = Math.atan2(room.cy - 49.5, room.cx - 49.5); placed.push(room); break;
+    }
+  }
+  if (placed.length < n) f.log.push(`O形: ${n} 個中 ${placed.length} 個を配置（スペース不足）`);
+  placed.sort((a, b) => a.angle - b.angle);
+  const edges = [];
+  for (let i = 0; i < placed.length; i++) {
+    const A = placed[i], B = placed[(i + 1) % placed.length];
+    if (A === B) break;
+    if (placed.length === 2 && i === 1) break;
+    edges.push([A.id, B.id]);
+  }
+  return edges;
+}
+
+function layoutZelda(f) {
+  const p = f.p, rng = f.rng;
+  const rw = Math.max(3, rng.int(p.wMin, p.wMax)), rh = Math.max(3, rng.int(p.hMin, p.hMax)), L = clamp(p.zeldaLen, 1, 20);
+  const pitchX = rw + L, pitchY = rh + L;
+  const cols = clamp(Math.floor((96 + L) / pitchX), 1, 20), rows = clamp(Math.floor((96 + L) / pitchY), 1, 20);
+  const offX = 2 + Math.floor((96 - (cols * rw + (cols - 1) * L)) / 2), offY = 2 + Math.floor((96 - (rows * rh + (rows - 1) * L)) / 2);
+  let n = rng.int(p.roomMin, p.roomMax);
+  if (n > cols * rows) { n = cols * rows; f.log.push(`ゼルダフロア: 格子が ${cols}×${rows} のため部屋数を ${n} に制限しました`); }
+  const present = new Set([rng.int(0, cols * rows - 1)]);
+  while (present.size < n) {
+    const cands = new Set();
+    for (const c of present) {
+      const gx = c % cols, gy = (c - gx) / cols;
+      for (const [dx, dy] of DIRS) { const nx = gx + dx, ny = gy + dy; if (nx >= 0 && ny >= 0 && nx < cols && ny < rows && !present.has(ny * cols + nx)) cands.add(ny * cols + nx); }
+    }
+    if (!cands.size) break;
+    present.add(rng.pick([...cands]));
+  }
+  const byCell = new Map();
+  for (const c of [...present].sort((a, b) => a - b)) {
+    const gx = c % cols, gy = (c - gx) / cols;
+    let kind = rollKind(f, rw, rh, rw % 2 === 1 && rh % 2 === 1);
+    const room = f.addRoom({ x0: offX + gx * pitchX, y0: offY + gy * pitchY, w: rw, h: rh, kind });
+    room.gx = gx; room.gy = gy; byCell.set(c, room);
+  }
+  // 隣接ペア → ランダム全域木 + 追加接続
+  const pairs = [];
+  for (const [c, room] of byCell) {
+    const gx = c % cols, gy = (c - gx) / cols;
+    const right = byCell.get(gy * cols + gx + 1), down = byCell.get((gy + 1) * cols + gx);
+    if (gx + 1 < cols && right) pairs.push([room.id, right.id]);
+    if (down) pairs.push([room.id, down.id]);
+  }
+  rng.shuffle(pairs);
+  const parent = f.rooms.map((_, i) => i), find = x => parent[x] === x ? x : (parent[x] = find(parent[x]));
+  const edges = [];
+  for (const [a, b] of pairs) { const ra = find(a), rb = find(b); if (ra !== rb) { parent[ra] = rb; edges.push([a, b]); } else if (rng.chance(p.extra / 100)) edges.push([a, b]); }
+  return edges;
+}
+
+// ---------- 接続保証 ----------
+function reachableMask(f, sx, sy) {
+  const seen = new Uint8Array(W * H), stack = [sy * W + sx]; seen[sy * W + sx] = 1;
+  while (stack.length) {
+    const i = stack.pop(), x = i % W, y = (i - x) / W;
+    for (const [dx, dy] of DIRS) {
+      const nx = x + dx, ny = y + dy; if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+      const ni = ny * W + nx; if (seen[ni]) continue;
+      const t = f.grid[ni]; if (t !== T.ROOM && t !== T.CORRIDOR) continue;
+      seen[ni] = 1; stack.push(ni);
+    }
+  }
+  return seen;
+}
+function ensureConnected(f) {
+  const rooms = f.rooms.filter(r => r.floor.length);
+  if (rooms.length < 2) return;
+  for (let iter = 0; iter < 4; iter++) {
+    const seen = reachableMask(f, rooms[0].floor[0].x, rooms[0].floor[0].y);
+    const isReached = r => r.floor.some(c => seen[c.y * W + c.x]);
+    const un = rooms.filter(r => !isReached(r)), ok = rooms.filter(isReached);
+    if (!un.length) return;
+    for (const r of un) {
+      ok.sort((a, b) => Math.hypot(a.cx - r.cx, a.cy - r.cy) - Math.hypot(b.cx - r.cx, b.cy - r.cy));
+      if (connectRooms(f, r, ok[0])) ok.push(r);
+    }
+  }
+  const seen = reachableMask(f, rooms[0].floor[0].x, rooms[0].floor[0].y);
+  const un = rooms.filter(r => !r.floor.some(c => seen[c.y * W + c.x]));
+  if (un.length) f.log.push(`警告: ${un.length} 個の部屋が孤立しています`);
+}
+
+// ---------- オブジェクト配置 ----------
+function populate(f) {
+  const p = f.p, rng = f.rng, rooms = f.rooms, occ = new Set();
+  const placeIn = (type, room, cells) => {
+    cells = cells || room.floor;
+    if (!cells.length) return false;
+    for (let t = 0; t < 40; t++) { const c = cells[rng.int(0, cells.length - 1)], k = c.y * W + c.x; if (!occ.has(k)) { occ.add(k); f.objects.push({ type, x: c.x, y: c.y, room: room.id }); return true; } }
+    for (const c of cells) { const k = c.y * W + c.x; if (!occ.has(k)) { occ.add(k); f.objects.push({ type, x: c.x, y: c.y, room: room.id }); return true; } }
+    return false;
+  };
+  const start = rng.pick(rooms); start.isStart = true;
+  // モンスターハウス
+  let mh = null;
+  if (rng.chance(p.mhProb / 100)) {
+    let cands = rooms.filter(r => r !== start && r.floor.length >= 12);
+    if (!cands.length && rooms.length === 1) cands = rooms;
+    if (cands.length) { mh = rng.pick(cands); mh.role = 'mhouse'; f.log.push(`モンスターハウス: 部屋#${mh.id}`); }
+  }
+  // 店（入口が最も少ない部屋を選ぶ。通常は入口1つ）
+  let shop = null;
+  const interior = r => r.floor.filter(c => c.x > r.x0 && c.x < r.x1 && c.y > r.y0 && c.y < r.y1);
+  if (rng.chance(p.shopProb / 100)) {
+    let cands = rooms.filter(r => r !== start && r.role === 'normal' && r.doors.length >= 1 && interior(r).length >= 4);
+    if (cands.length) {
+      const minD = Math.min(...cands.map(r => r.doors.length));
+      shop = rng.pick(cands.filter(r => r.doors.length === minD)); shop.role = 'shop';
+      f.log.push(`店: 部屋#${shop.id}（入口 ${shop.doors.length}）`);
+    } else f.log.push('店: 条件に合う部屋がないため配置なし');
+  }
+  // 階段
+  for (let s = 0; s < p.stairs; s++) {
+    let cands = rooms.filter(r => (rooms.length > 1 ? r !== start : true) && r.role !== 'shop');
+    if (!cands.length) cands = rooms;
+    placeIn('stairs', rng.pick(cands));
+  }
+  placeIn('player', start);
+  // 店の中身
+  if (shop) {
+    for (const d of shop.doors) {
+      const ins = d.side === 'top' ? { x: d.x, y: d.y + 1 } : d.side === 'bottom' ? { x: d.x, y: d.y - 1 } : d.side === 'left' ? { x: d.x + 1, y: d.y } : { x: d.x - 1, y: d.y };
+      if (f.get(ins.x, ins.y) === T.ROOM) placeIn('shopkeeper', shop, [ins]); else placeIn('shopkeeper', shop);
+    }
+    for (const c of interior(shop)) if (rng.chance(0.85)) placeIn('shopItem', shop, [c]);
+  }
+  // モンスターハウスの中身
+  if (mh) {
+    const n = mh.floor.length;
+    for (let i = 0; i < clamp(Math.round(n * 0.2), 4, 80); i++) placeIn('monster', mh);
+    for (let i = 0; i < Math.min(Math.round(n * 0.1), 40); i++) placeIn('item', mh);
+    for (let i = 0; i < Math.min(Math.round(n * 0.04), 20); i++) placeIn('trap', mh);
+  }
+  // 通常配置
+  const pickRoom = (filter) => { let c = rooms.filter(filter); if (!c.length) c = rooms.filter(r => r.role !== 'shop'); if (!c.length) c = rooms; return rng.pick(c); };
+  for (let i = 0; i < p.items; i++) placeIn('item', pickRoom(r => r.role !== 'shop' && r.role !== 'mhouse'));
+  for (let i = 0; i < p.monsters; i++) placeIn('monster', pickRoom(r => r.role !== 'shop' && r.role !== 'mhouse' && (rooms.length > 1 ? r !== start : true)));
+  for (let i = 0; i < p.traps; i++) placeIn('trap', pickRoom(r => r.role !== 'shop' && r.role !== 'mhouse'));
+}
+
+function generateFloor(params) {
+  const p = Object.assign({}, DEFAULTS, params);
+  const seed = String(p.seed || '').trim() || String(Math.floor(Math.random() * 1e9));
+  const rng = new RNG(seed), f = new Floor(p, rng, seed);
+  let edges = [];
+  switch (p.floorType) {
+    case 'bigRoom': edges = layoutBig(f, 'normal'); break;
+    case 'bigRoomPillar': edges = layoutBig(f, 'pillar'); break;
+    case 'bigMaze': edges = layoutBig(f, 'maze'); break;
+    case 'sun': edges = layoutSun(f); break;
+    case 'o': edges = layoutO(f); break;
+    case 'zelda': edges = layoutZelda(f); break;
+    default: edges = layoutNormal(f);
+  }
+  const opts = p.floorType === 'zelda' ? { centered: true, bend: 0 } : {};
+  let failed = 0;
+  for (const [i, j] of edges) if (!connectRooms(f, f.rooms[i], f.rooms[j], opts)) failed++;
+  if (failed) f.log.push(`通路 ${failed} 本が掘れませんでした`);
+  ensureConnected(f);
+  populate(f);
+  return f;
+}
+
+// ---------- テキスト / JSON 出力 ----------
+function floorToText(f, withObjects = true) {
+  const wall = MATERIALS[f.p.wall].ch;
+  const rows = [];
+  for (let y = 0; y < H; y++) {
+    let s = '';
+    for (let x = 0; x < W; x++) {
+      const t = f.get(x, y);
+      s += t === T.BORDER ? '#' : t === T.ROOM ? '.' : t === T.CORRIDOR ? ',' : wall;
+    }
+    rows.push(s.split(''));
+  }
+  if (withObjects) for (const o of f.objects) rows[o.y][o.x] = OBJ[o.type].ch;
+  return rows.map(r => r.join('')).join('\n');
+}
+function floorToJSON(f) {
+  return {
+    seed: f.seed, params: f.p, width: W, height: H,
+    legend: { '#': '絶対壁(外周)', [MATERIALS[f.p.wall].ch]: MATERIALS[f.p.wall].label, '.': '部屋の床', ',': '通路' },
+    terrain: floorToText(f, false).split('\n'),
+    rooms: f.rooms.map(r => ({ id: r.id, x0: r.x0, y0: r.y0, x1: r.x1, y1: r.y1, kind: r.kind, role: r.role, isStart: !!r.isStart, doors: r.doors })),
+    objects: f.objects,
+    log: f.log,
+  };
+}
+
+if (typeof module !== 'undefined') module.exports = { generateFloor, floorToText, floorToJSON, DEFAULTS, T, W, H, MATERIALS, OBJ };
+
+// ============================================================
+//  UI
+// ============================================================
+if (typeof document !== 'undefined') (function () {
+  const SCHEMA = [
+    { group: '基本' },
+    { id: 'seed', type: 'text', label: 'シード', placeholder: '空欄でランダム' },
+    { id: 'floorType', type: 'select', label: 'フロアタイプ', options: FLOOR_TYPES },
+    { id: 'wall', type: 'select', label: '壁の素材', options: Object.fromEntries(Object.entries(MATERIALS).map(([k, v]) => [k, v.label])) },
+    { group: '部屋' },
+    { id: 'roomMin', id2: 'roomMax', type: 'pair', label: '部屋の数（最小〜最大）', min: 1, max: 40 },
+    { id: 'wMin', id2: 'wMax', type: 'pair', label: '部屋の幅（最小〜最大）', min: 3, max: 60 },
+    { id: 'hMin', id2: 'hMax', type: 'pair', label: '部屋の高さ（最小〜最大）', min: 3, max: 60 },
+    { id: 'roundProb', type: 'range', label: '角の丸い部屋の確率', min: 0, max: 100, unit: '%' },
+    { id: 'pillarProb', type: 'range', label: '柱の間の確率', min: 0, max: 100, unit: '%' },
+    { id: 'mazeProb', type: 'range', label: '迷路部屋の確率', min: 0, max: 100, unit: '%' },
+    { id: 'mazeLoop', type: 'range', label: '迷路のループ率', min: 0, max: 100, unit: '%' },
+    { id: 'centerSize', type: 'range', label: '中央の部屋の大きさ（太陽）', min: 8, max: 60 },
+    { id: 'zeldaLen', type: 'range', label: '通路の長さ（ゼルダ）', min: 2, max: 12 },
+    { group: '通路' },
+    { id: 'bend', type: 'range', label: '通路の曲がり具合', min: 0, max: 100 },
+    { id: 'extra', type: 'range', label: '追加通路の確率', min: 0, max: 100, unit: '%' },
+    { group: 'オブジェクト' },
+    { id: 'stairs', type: 'number', label: '階段の数', min: 0, max: 9 },
+    { id: 'items', type: 'number', label: 'アイテムの数', min: 0, max: 300 },
+    { id: 'monsters', type: 'number', label: 'モンスターの数', min: 0, max: 300 },
+    { id: 'traps', type: 'number', label: '罠の数', min: 0, max: 300 },
+    { id: 'shopProb', type: 'range', label: '店の出現率', min: 0, max: 100, unit: '%' },
+    { id: 'mhProb', type: 'range', label: 'モンスターハウスの出現率', min: 0, max: 100, unit: '%' },
+    { group: '表示' },
+    { id: 'cellSize', type: 'range', label: 'マスの大きさ(px)', min: 3, max: 16, view: true },
+    { id: 'showGrid', type: 'checkbox', label: 'グリッド線', view: true },
+    { id: 'showLabels', type: 'checkbox', label: '記号を表示（10px以上）', view: true },
+  ];
+  const $ = id => document.getElementById(id);
+  const controls = $('controls'), inputs = {};
+
+  function buildControls() {
+    for (const s of SCHEMA) {
+      if (s.group) { const h = document.createElement('h2'); h.textContent = s.group; controls.appendChild(h); continue; }
+      const row = document.createElement('div'); row.className = 'row' + (s.type === 'pair' ? ' pair' : '');
+      const label = document.createElement('label'); label.textContent = s.label; row.appendChild(label);
+      const mk = (id, type) => {
+        let el;
+        if (type === 'select') { el = document.createElement('select'); for (const [k, v] of Object.entries(s.options)) { const o = document.createElement('option'); o.value = k; o.textContent = v; el.appendChild(o); } }
+        else { el = document.createElement('input'); el.type = type; if (s.min !== undefined) { el.min = s.min; el.max = s.max; } if (s.placeholder) el.placeholder = s.placeholder; }
+        el.id = 'in_' + id; inputs[id] = el; return el;
+      };
+      if (s.type === 'pair') {
+        row.appendChild(mk(s.id, 'number')); const sep = document.createElement('span'); sep.textContent = '〜'; row.appendChild(sep); row.appendChild(mk(s.id2, 'number'));
+      } else if (s.type === 'range') {
+        const el = mk(s.id, 'range'); row.appendChild(el);
+        const v = document.createElement('span'); v.className = 'val'; row.appendChild(v);
+        el.addEventListener('input', () => v.textContent = el.value + (s.unit || ''));
+        el._val = v;
+      } else row.appendChild(mk(s.id, s.type));
+      controls.appendChild(row);
+    }
+    for (const s of SCHEMA) if (s.view) inputs[s.id].addEventListener('input', () => { if (current) render(current); });
+  }
+  function setParams(p) {
+    for (const [k, v] of Object.entries(p)) { const el = inputs[k]; if (!el) continue; if (el.type === 'checkbox') el.checked = !!v; else el.value = v; if (el._val) el._val.textContent = el.value + ((SCHEMA.find(s => s.id === k) || {}).unit || ''); }
+  }
+  function getParams() {
+    const p = {};
+    for (const [k, el] of Object.entries(inputs)) {
+      if (el.type === 'checkbox') p[k] = el.checked;
+      else if (el.type === 'number' || el.type === 'range') { let v = Number(el.value); if (!Number.isFinite(v)) v = DEFAULTS[k]; p[k] = clamp(Math.round(v), Number(el.min), Number(el.max)); }
+      else p[k] = el.value;
+    }
+    for (const [a, b] of [['roomMin', 'roomMax'], ['wMin', 'wMax'], ['hMin', 'hMax']]) if (p[a] > p[b]) [p[a], p[b]] = [p[b], p[a]];
+    return p;
+  }
+
+  // ---------- 描画 ----------
+  const cv = $('cv'), ctx = cv.getContext('2d');
+  let current = null;
+  function render(f) {
+    const p = getParams(), cs = p.cellSize, dpr = window.devicePixelRatio || 1;
+    cv.width = W * cs * dpr; cv.height = H * cs * dpr; cv.style.width = W * cs + 'px'; cv.style.height = H * cs + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const wallColor = MATERIALS[f.p.wall].color;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const t = f.get(x, y); let c;
+      if (t === T.BORDER) c = TERRAIN_COLORS.border;
+      else if (t === T.WALL || t === T.ROOMWALL) c = wallColor;
+      else if (t === T.CORRIDOR) c = TERRAIN_COLORS.corridor;
+      else { const r = f.rooms[f.rid(x, y)]; c = r && r.role === 'shop' ? TERRAIN_COLORS.shop : r && r.role === 'mhouse' ? TERRAIN_COLORS.mhouse : TERRAIN_COLORS.room; }
+      ctx.fillStyle = c; ctx.fillRect(x * cs, y * cs, cs, cs);
+    }
+    if (p.showGrid && cs >= 5) {
+      ctx.strokeStyle = 'rgba(0,0,0,0.18)'; ctx.lineWidth = 1; ctx.beginPath();
+      for (let x = 0; x <= W; x++) { ctx.moveTo(x * cs + 0.5, 0); ctx.lineTo(x * cs + 0.5, H * cs); }
+      for (let y = 0; y <= H; y++) { ctx.moveTo(0, y * cs + 0.5); ctx.lineTo(W * cs, y * cs + 0.5); }
+      ctx.stroke();
+    }
+    const rad = cs * 0.42;
+    ctx.font = `bold ${Math.floor(cs * 0.7)}px sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    for (const o of f.objects) {
+      const cx = o.x * cs + cs / 2, cy = o.y * cs + cs / 2, def = OBJ[o.type];
+      ctx.beginPath(); ctx.arc(cx, cy, rad, 0, Math.PI * 2); ctx.fillStyle = def.color; ctx.fill();
+      ctx.lineWidth = Math.max(1, cs / 8); ctx.strokeStyle = 'rgba(0,0,0,0.75)'; ctx.stroke();
+      if (p.showLabels && cs >= 10) { ctx.fillStyle = o.type === 'stairs' || o.type === 'player' ? '#000' : '#fff'; ctx.fillText(def.mark, cx, cy + 0.5); }
+    }
+    renderLegend(f);
+  }
+  function renderLegend(f) {
+    const lg = $('legend'); lg.innerHTML = '';
+    const add = (color, text, circle) => { const d = document.createElement('span'); d.className = 'lg'; const sw = document.createElement('span'); sw.className = 'sw' + (circle ? ' circle' : ''); sw.style.background = color; d.appendChild(sw); d.appendChild(document.createTextNode(text)); lg.appendChild(d); };
+    add(TERRAIN_COLORS.border, '絶対壁（外周）'); add(MATERIALS[f.p.wall].color, MATERIALS[f.p.wall].label);
+    add(TERRAIN_COLORS.room, '部屋の床'); add(TERRAIN_COLORS.corridor, '通路'); add(TERRAIN_COLORS.shop, '店の床'); add(TERRAIN_COLORS.mhouse, 'モンスターハウス');
+    for (const [k, v] of Object.entries(OBJ)) add(v.color, v.label, true);
+  }
+
+  // ---------- 生成 ----------
+  function describe(f) {
+    const cnt = {}; for (const o of f.objects) cnt[o.type] = (cnt[o.type] || 0) + 1;
+    const kinds = {}; for (const r of f.rooms) kinds[r.kind] = (kinds[r.kind] || 0) + 1;
+    const kindLabel = { normal: '通常', rounded: '角丸', pillar: '柱の間', maze: '迷路' };
+    return `シード: ${f.seed} ／ ${FLOOR_TYPES[f.p.floorType]} ／ ${MATERIALS[f.p.wall].label} ／ 部屋 ${f.rooms.length}（${Object.entries(kinds).map(([k, v]) => `${kindLabel[k]}${v}`).join(' ')}）\n`
+      + Object.entries(OBJ).map(([k, v]) => `${v.label} ${cnt[k] || 0}`).join(' ／ ');
+  }
+  function generate(newSeed) {
+    const p = getParams();
+    if (newSeed || !p.seed) { p.seed = Math.random().toString(36).slice(2, 10); inputs.seed.value = p.seed; }
+    try {
+      current = generateFloor(p);
+    } catch (e) { $('status').textContent = 'エラー: ' + e.message; console.error(e); return; }
+    render(current);
+    $('status').textContent = describe(current);
+    $('log').textContent = current.log.join('\n');
+    if ($('text').classList.contains('show')) $('text').value = floorToText(current);
+    try { history.replaceState(null, '', '#' + btoa(unescape(encodeURIComponent(JSON.stringify(p))))); } catch (e) { /* ignore */ }
+  }
+
+  // ---------- ホバー情報 ----------
+  const baseStatus = () => current ? describe(current) : '';
+  cv.addEventListener('mousemove', e => {
+    if (!current) return;
+    const cs = getParams().cellSize, rect = cv.getBoundingClientRect();
+    const x = Math.floor((e.clientX - rect.left) / cs), y = Math.floor((e.clientY - rect.top) / cs);
+    if (x < 0 || y < 0 || x >= W || y >= H) return;
+    const t = current.get(x, y), rid = current.rid(x, y);
+    const tn = t === T.BORDER ? '絶対壁（外周）' : t === T.WALL || t === T.ROOMWALL ? MATERIALS[current.p.wall].label : t === T.CORRIDOR ? '通路' : '部屋の床';
+    const room = rid >= 0 ? current.rooms[rid] : null;
+    const roleLabel = { normal: '', center: '中央', shop: '店', mhouse: 'モンスターハウス' };
+    const kindLabel = { normal: '', rounded: '角丸', pillar: '柱の間', maze: '迷路' };
+    let s = `(${x}, ${y}) ${tn}`;
+    if (room) s += ` ／ 部屋#${room.id} ${room.w}×${room.h} ${[kindLabel[room.kind], roleLabel[room.role], room.isStart ? '開始' : ''].filter(Boolean).join(' ')}`;
+    const objs = current.objects.filter(o => o.x === x && o.y === y);
+    if (objs.length) s += ' ／ ' + objs.map(o => OBJ[o.type].label).join(', ');
+    $('status').textContent = baseStatus() + '\n' + s;
+  });
+  cv.addEventListener('mouseleave', () => { $('status').textContent = baseStatus(); });
+
+  // ---------- ボタン ----------
+  function download(name, blob) { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000); }
+  $('btnGen').addEventListener('click', () => generate(false));
+  $('btnNewSeed').addEventListener('click', () => generate(true));
+  $('btnReset').addEventListener('click', () => { setParams(DEFAULTS); generate(true); });
+  $('btnPng').addEventListener('click', () => { if (current) cv.toBlob(b => download(`floor_${current.seed}.png`, b)); });
+  $('btnJson').addEventListener('click', () => { if (current) download(`floor_${current.seed}.json`, new Blob([JSON.stringify(floorToJSON(current), null, 1)], { type: 'application/json' })); });
+  $('btnText').addEventListener('click', () => { const t = $('text'); t.classList.toggle('show'); if (current && t.classList.contains('show')) t.value = floorToText(current); });
+  document.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.tagName !== 'BUTTON' && e.target.tagName !== 'TEXTAREA') generate(false); });
+
+  // ---------- 初期化 ----------
+  buildControls();
+  let initial = Object.assign({}, DEFAULTS);
+  try { if (location.hash.length > 1) Object.assign(initial, JSON.parse(decodeURIComponent(escape(atob(location.hash.slice(1)))))); } catch (e) { /* ignore */ }
+  setParams(initial);
+  generate(false);
+  window.addEventListener('hashchange', () => {
+    try { if (location.hash.length > 1) { setParams(Object.assign({}, DEFAULTS, JSON.parse(decodeURIComponent(escape(atob(location.hash.slice(1))))))); generate(false); } } catch (e) { /* ignore */ }
+  });
+})();
+</script>
+</body>
+</html>
