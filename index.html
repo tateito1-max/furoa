@@ -17,10 +17,11 @@
   #panel h2 { font-size: 12px; margin: 14px 0 6px; color: var(--accent); letter-spacing: .05em; border-bottom: 1px solid var(--border); padding-bottom: 3px; }
   .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 4px 0; }
   .row label { flex: 1; color: var(--text); }
-  .row .val { color: var(--muted); min-width: 32px; text-align: right; font-variant-numeric: tabular-nums; }
+  .row .val { color: var(--muted); min-width: 14px; font-variant-numeric: tabular-nums; }
+  .row input[type=number].num { width: 56px; padding: 3px 4px; }
   .row input[type=number], .row input[type=text], .row select { width: 120px; background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px; font-size: 13px; }
   .row input[type=text] { width: 160px; }
-  .row input[type=range] { width: 130px; }
+  .row input[type=range] { width: 90px; min-width: 60px; }
   .row.pair input[type=number] { width: 58px; }
   .hint { color: var(--muted); font-size: 11px; margin: 0 0 6px; }
   .btns { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
@@ -128,7 +129,7 @@ const DEFAULTS = {
   seed: '', floorType: 'normal', wall: 'normal',
   roomMin: 5, roomMax: 8, wMin: 5, wMax: 14, hMin: 4, hMax: 10,
   centerSize: 30, zeldaLen: 3,
-  roundProb: 30, pillarProb: 15, mazeProb: 10, mazeLoop: 10,
+  roundProb: 30, pillarProb: 15, pillarOdd: true, mazeProb: 10, mazeLoop: 10,
   bend: 30, extra: 25,
   items: 6, monsters: 5, traps: 4, stairs: 1, shopProb: 20, mhProb: 10,
   cellSize: 8, showGrid: true, showLabels: true, fitWidth: false,
@@ -169,7 +170,7 @@ class Floor {
   }
   addRoom(spec) {
     let { x0, y0, w, h, kind = 'normal', role = 'normal' } = spec;
-    if (kind === 'maze') { if (w % 2 === 0) w--; if (h % 2 === 0) h--; }
+    if (kind === 'maze' || (kind === 'pillar' && this.p.pillarOdd)) { if (w % 2 === 0) w--; if (h % 2 === 0) h--; }
     const room = { id: this.rooms.length, x0, y0, w, h, x1: x0 + w - 1, y1: y0 + h - 1, kind, role, doors: [], floor: [] };
     room.cx = (room.x0 + room.x1) / 2; room.cy = (room.y0 + room.y1) / 2;
     if (room.x0 < 1 || room.y0 < 1 || room.x1 > W - 2 || room.y1 > H - 2) throw new Error('room out of bounds');
@@ -226,10 +227,12 @@ function carveMaze(f, room, loopRate) {
   }
 }
 
-function rollKind(f, w, h, allowMaze = true) {
+// fixedSize: 部屋サイズを縮められない場合（ゼルダフロア）は、奇数が必要な種類を偶数サイズでは選ばない
+function rollKind(f, w, h, fixedSize = false) {
   const p = f.p, rng = f.rng;
-  if (allowMaze && w >= 5 && h >= 5 && rng.chance(p.mazeProb / 100)) return 'maze';
-  if (w >= 5 && h >= 5 && rng.chance(p.pillarProb / 100)) return 'pillar';
+  const isOdd = w % 2 === 1 && h % 2 === 1;
+  if ((!fixedSize || isOdd) && w >= 5 && h >= 5 && rng.chance(p.mazeProb / 100)) return 'maze';
+  if ((!fixedSize || isOdd || !p.pillarOdd) && w >= 5 && h >= 5 && rng.chance(p.pillarProb / 100)) return 'pillar';
   if (Math.min(w, h) >= 5 && rng.chance(p.roundProb / 100)) return 'rounded';
   return 'normal';
 }
@@ -489,7 +492,7 @@ function layoutZelda(f) {
   const byCell = new Map();
   for (const c of [...present].sort((a, b) => a - b)) {
     const gx = c % cols, gy = (c - gx) / cols;
-    let kind = rollKind(f, rw, rh, rw % 2 === 1 && rh % 2 === 1);
+    const kind = rollKind(f, rw, rh, true);
     const room = f.addRoom({ x0: offX + gx * pitchX, y0: offY + gy * pitchY, w: rw, h: rh, kind });
     room.gx = gx; room.gy = gy; byCell.set(c, room);
   }
@@ -685,6 +688,7 @@ if (typeof document !== 'undefined') (function () {
     { id: 'hMin', id2: 'hMax', type: 'pair', label: '部屋の高さ（最小〜最大）', min: 3, max: 60 },
     { id: 'roundProb', type: 'range', label: '角の丸い部屋の確率', min: 0, max: 100, unit: '%' },
     { id: 'pillarProb', type: 'range', label: '柱の間の確率', min: 0, max: 100, unit: '%' },
+    { id: 'pillarOdd', type: 'checkbox', label: '柱の間は縦横を奇数に限定' },
     { id: 'mazeProb', type: 'range', label: '迷路部屋の確率', min: 0, max: 100, unit: '%' },
     { id: 'mazeLoop', type: 'range', label: '迷路のループ率', min: 0, max: 100, unit: '%' },
     { id: 'centerSize', type: 'range', label: '中央の部屋の大きさ（太陽）', min: 8, max: 60 },
@@ -723,16 +727,19 @@ if (typeof document !== 'undefined') (function () {
         row.appendChild(mk(s.id, 'number')); const sep = document.createElement('span'); sep.textContent = '〜'; row.appendChild(sep); row.appendChild(mk(s.id2, 'number'));
       } else if (s.type === 'range') {
         const el = mk(s.id, 'range'); row.appendChild(el);
-        const v = document.createElement('span'); v.className = 'val'; row.appendChild(v);
-        el.addEventListener('input', () => v.textContent = el.value + (s.unit || ''));
-        el._val = v;
+        const num = document.createElement('input'); num.type = 'number'; num.className = 'num'; num.min = s.min; num.max = s.max; num.step = 1; row.appendChild(num);
+        const unit = document.createElement('span'); unit.className = 'val'; unit.textContent = s.unit || ''; row.appendChild(unit);
+        el.addEventListener('input', () => { num.value = el.value; });
+        num.addEventListener('input', () => { const v = Number(num.value); if (Number.isFinite(v) && num.value !== '') { el.value = clamp(Math.round(v), s.min, s.max); el.dispatchEvent(new Event('input')); num.value = el.value; } });
+        num.addEventListener('change', () => { num.value = el.value; });
+        el._num = num;
       } else row.appendChild(mk(s.id, s.type));
       controls.appendChild(row);
     }
     for (const s of SCHEMA) if (s.view) inputs[s.id].addEventListener('input', () => { if (current) render(current); });
   }
   function setParams(p) {
-    for (const [k, v] of Object.entries(p)) { const el = inputs[k]; if (!el) continue; if (el.type === 'checkbox') el.checked = !!v; else el.value = v; if (el._val) el._val.textContent = el.value + ((SCHEMA.find(s => s.id === k) || {}).unit || ''); }
+    for (const [k, v] of Object.entries(p)) { const el = inputs[k]; if (!el) continue; if (el.type === 'checkbox') el.checked = !!v; else el.value = v; if (el._num) el._num.value = el.value; }
   }
   function getParams() {
     const p = {};
