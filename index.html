@@ -116,6 +116,7 @@ const OBJ = {
   trap:       { label: '罠',              color: '#9b59b6', ch: 't', mark: 'T' },
   shopkeeper: { label: '店主',            color: '#ff8c1a', ch: 'K', mark: '店' },
   shopItem:   { label: '店の商品',        color: '#1abc9c', ch: '$', mark: '$' },
+  treasure:   { label: '埋蔵金',          color: '#b8860b', ch: 'G', mark: '金' },
 };
 const TERRAIN_COLORS = {
   border: '#000000',
@@ -123,6 +124,7 @@ const TERRAIN_COLORS = {
   corridor: '#a99270',
   shop: '#f0d070',
   mhouse: '#e39a9a',
+  treasure: '#c9b3ef',
 };
 
 const DEFAULTS = {
@@ -131,7 +133,7 @@ const DEFAULTS = {
   centerSize: 30, zeldaLen: 3,
   roundProb: 30, pillarProb: 15, pillarOdd: true, mazeProb: 10, mazeLoop: 10,
   bend: 30, extra: 25,
-  items: 6, monsters: 5, traps: 4, stairs: 1, shopProb: 20, mhProb: 10,
+  items: 6, monsters: 5, traps: 4, stairs: 1, shopProb: 20, mhProb: 10, treasureProb: 10,
   cellSize: 8, showGrid: true, showLabels: true, fitWidth: false,
 };
 
@@ -543,9 +545,39 @@ function ensureConnected(f) {
   if (un.length) f.log.push(`警告: ${un.length} 個の部屋が孤立しています`);
 }
 
+// ---------- 埋蔵金部屋 ----------
+// 通路をすべて掘り終えた後に、壁だけの領域へ孤立した部屋を置く。
+// 周囲は margin マス以上の壁で囲まれ、どの部屋・通路とも繋がらない。
+function placeTreasureRoom(f) {
+  const rng = f.rng;
+  // 使用中マス（壁以外・部屋の一部）の二次元累積和
+  const S = new Int32Array((W + 1) * (H + 1));
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x, used = (f.grid[i] !== T.WALL || f.roomId[i] !== -1) ? 1 : 0;
+    S[(y + 1) * (W + 1) + x + 1] = used + S[y * (W + 1) + x + 1] + S[(y + 1) * (W + 1) + x] - S[y * (W + 1) + x];
+  }
+  const usedIn = (x0, y0, x1, y1) => S[(y1 + 1) * (W + 1) + x1 + 1] - S[y0 * (W + 1) + x1 + 1] - S[(y1 + 1) * (W + 1) + x0] + S[y0 * (W + 1) + x0];
+  const sizes = [];
+  for (let t = 0; t < 6; t++) sizes.push([rng.int(4, 7), rng.int(3, 5)]);
+  sizes.push([4, 3], [3, 4], [3, 3], [2, 2]);
+  for (const margin of [2, 1]) for (const [w, h] of sizes) {
+    const cands = [];
+    // 外周の絶対壁の内側にも最低1マスの壁を残す（x0-margin >= 1）
+    for (let y0 = 1 + margin; y0 + h - 1 + margin <= H - 2; y0++) for (let x0 = 1 + margin; x0 + w - 1 + margin <= W - 2; x0++)
+      if (!usedIn(x0 - margin, y0 - margin, x0 + w - 1 + margin, y0 + h - 1 + margin)) cands.push([x0, y0]);
+    if (!cands.length) continue;
+    const [x0, y0] = rng.pick(cands);
+    const room = f.addRoom({ x0, y0, w, h, kind: 'normal', role: 'treasure' });
+    f.log.push(`埋蔵金部屋: 部屋#${room.id} ${w}×${h}（通路なし・周囲の壁 ${margin} マス以上）`);
+    return room;
+  }
+  f.log.push('埋蔵金部屋: 孤立させられる空きがないため配置なし');
+  return null;
+}
+
 // ---------- オブジェクト配置 ----------
 function populate(f) {
-  const p = f.p, rng = f.rng, rooms = f.rooms, occ = new Set();
+  const p = f.p, rng = f.rng, rooms = f.rooms.filter(r => r.role !== 'treasure'), occ = new Set();
   const placeIn = (type, room, cells) => {
     cells = cells || room.floor;
     if (!cells.length) return false;
@@ -594,19 +626,34 @@ function populate(f) {
   placeIn('player', start);
   // 店の中身
   if (shop) {
+    // 店主: 入口の内側マスの隣（壁沿いの左右どちらか）。入口そのものは塞がない
+    const doorInside = d => d.side === 'top' ? { x: d.x, y: d.y + 1 } : d.side === 'bottom' ? { x: d.x, y: d.y - 1 } : d.side === 'left' ? { x: d.x + 1, y: d.y } : { x: d.x - 1, y: d.y };
+    const insides = new Set(shop.doors.map(d => { const c = doorInside(d); return c.y * W + c.x; }));
     for (const d of shop.doors) {
-      const ins = d.side === 'top' ? { x: d.x, y: d.y + 1 } : d.side === 'bottom' ? { x: d.x, y: d.y - 1 } : d.side === 'left' ? { x: d.x + 1, y: d.y } : { x: d.x - 1, y: d.y };
-      if (f.get(ins.x, ins.y) === T.ROOM) placeIn('shopkeeper', shop, [ins]); else placeIn('shopkeeper', shop);
+      const ins = doorInside(d);
+      const side = (d.side === 'top' || d.side === 'bottom') ? [{ x: ins.x - 1, y: ins.y }, { x: ins.x + 1, y: ins.y }] : [{ x: ins.x, y: ins.y - 1 }, { x: ins.x, y: ins.y + 1 }];
+      let cands = rng.shuffle(side).filter(c => f.rid(c.x, c.y) === shop.id && f.get(c.x, c.y) === T.ROOM && !insides.has(c.y * W + c.x) && !occ.has(c.y * W + c.x));
+      const preferred = cands.filter(c => !isEntrance(c));
+      if (preferred.length) cands = preferred;
+      if (!cands.length || !placeIn('shopkeeper', shop, [cands[0]])) placeIn('shopkeeper', shop, shop.floor.filter(c => !insides.has(c.y * W + c.x) && !isEntrance(c)));
     }
     let placed = false;
     for (const [bw, bh] of rng.shuffle(SHOP_BLOCKS.slice())) {
       const pl = blockPlacements(shop, bw, bh);
       if (!pl.length) continue;
-      const b = rng.pick(pl);
+      // 中央に最も近い配置を選ぶ（同じ距離なら乱択）
+      const dist = b => Math.hypot(b.x + (bw - 1) / 2 - shop.cx, b.y + (bh - 1) / 2 - shop.cy);
+      const best = Math.min(...pl.map(dist));
+      const b = rng.pick(pl.filter(q => dist(q) - best < 1e-6));
       for (let j = 0; j < bh; j++) for (let i = 0; i < bw; i++) placeIn('shopItem', shop, [{ x: b.x + i, y: b.y + j }]);
       f.log.push(`店の商品: ${bw}×${bh} = ${bw * bh} 個`); placed = true; break;
     }
     if (!placed) f.log.push('店の商品: 置ける場所がありません');
+  }
+  // 埋蔵金部屋の中身（ほぼ埋蔵金で埋め、少しアイテムを混ぜる）
+  for (const tr of f.rooms.filter(r => r.role === 'treasure')) {
+    for (const c of tr.floor) { const roll = rng.next(); if (roll < 0.6) placeIn('treasure', tr, [c]); else if (roll < 0.8) placeIn('item', tr, [c]); }
+    if (!f.objects.some(o => o.type === 'treasure' && o.room === tr.id)) placeIn('treasure', tr);
   }
   // モンスターハウスの中身
   if (mh) {
@@ -641,6 +688,7 @@ function generateFloor(params) {
   for (const [i, j] of edges) if (!connectRooms(f, f.rooms[i], f.rooms[j], opts)) failed++;
   if (failed) f.log.push(`通路 ${failed} 本が掘れませんでした`);
   ensureConnected(f);
+  if (rng.chance(p.treasureProb / 100)) placeTreasureRoom(f);
   populate(f);
   return f;
 }
@@ -703,6 +751,7 @@ if (typeof document !== 'undefined') (function () {
     { id: 'traps', type: 'number', label: '罠の数', min: 0, max: 300 },
     { id: 'shopProb', type: 'range', label: '店の出現率', min: 0, max: 100, unit: '%' },
     { id: 'mhProb', type: 'range', label: 'モンスターハウスの出現率', min: 0, max: 100, unit: '%' },
+    { id: 'treasureProb', type: 'range', label: '埋蔵金部屋の出現率', min: 0, max: 100, unit: '%' },
     { group: '表示' },
     { id: 'cellSize', type: 'range', label: 'マスの大きさ(px)', min: 3, max: 16, view: true },
     { id: 'showGrid', type: 'checkbox', label: 'グリッド線', view: true },
@@ -766,7 +815,7 @@ if (typeof document !== 'undefined') (function () {
       if (t === T.BORDER) c = TERRAIN_COLORS.border;
       else if (t === T.WALL || t === T.ROOMWALL) c = wallColor;
       else if (t === T.CORRIDOR) c = TERRAIN_COLORS.corridor;
-      else { const r = f.rooms[f.rid(x, y)]; c = r && r.role === 'shop' ? TERRAIN_COLORS.shop : r && r.role === 'mhouse' ? TERRAIN_COLORS.mhouse : TERRAIN_COLORS.room; }
+      else { const r = f.rooms[f.rid(x, y)]; c = r && r.role === 'shop' ? TERRAIN_COLORS.shop : r && r.role === 'mhouse' ? TERRAIN_COLORS.mhouse : r && r.role === 'treasure' ? TERRAIN_COLORS.treasure : TERRAIN_COLORS.room; }
       ctx.fillStyle = c; ctx.fillRect(x * cs, y * cs, cs, cs);
     }
     if (p.showGrid && cs >= 5) {
@@ -789,7 +838,7 @@ if (typeof document !== 'undefined') (function () {
     const lg = $('legend'); lg.innerHTML = '';
     const add = (color, text, circle) => { const d = document.createElement('span'); d.className = 'lg'; const sw = document.createElement('span'); sw.className = 'sw' + (circle ? ' circle' : ''); sw.style.background = color; d.appendChild(sw); d.appendChild(document.createTextNode(text)); lg.appendChild(d); };
     add(TERRAIN_COLORS.border, '絶対壁（外周）'); add(MATERIALS[f.p.wall].color, MATERIALS[f.p.wall].label);
-    add(TERRAIN_COLORS.room, '部屋の床'); add(TERRAIN_COLORS.corridor, '通路'); add(TERRAIN_COLORS.shop, '店の床'); add(TERRAIN_COLORS.mhouse, 'モンスターハウス');
+    add(TERRAIN_COLORS.room, '部屋の床'); add(TERRAIN_COLORS.corridor, '通路'); add(TERRAIN_COLORS.shop, '店の床'); add(TERRAIN_COLORS.mhouse, 'モンスターハウス'); add(TERRAIN_COLORS.treasure, '埋蔵金部屋');
     for (const [k, v] of Object.entries(OBJ)) add(v.color, v.label, true);
   }
 
@@ -824,7 +873,7 @@ if (typeof document !== 'undefined') (function () {
     const t = current.get(x, y), rid = current.rid(x, y);
     const tn = t === T.BORDER ? '絶対壁（外周）' : t === T.WALL || t === T.ROOMWALL ? MATERIALS[current.p.wall].label : t === T.CORRIDOR ? '通路' : '部屋の床';
     const room = rid >= 0 ? current.rooms[rid] : null;
-    const roleLabel = { normal: '', center: '中央', shop: '店', mhouse: 'モンスターハウス' };
+    const roleLabel = { normal: '', center: '中央', shop: '店', mhouse: 'モンスターハウス', treasure: '埋蔵金部屋' };
     const kindLabel = { normal: '', rounded: '角丸', pillar: '柱の間', maze: '迷路' };
     let s = `(${x}, ${y}) ${tn}`;
     if (room) s += ` ／ 部屋#${room.id} ${room.w}×${room.h} ${[kindLabel[room.kind], roleLabel[room.role], room.isStart ? '開始' : ''].filter(Boolean).join(' ')}`;
